@@ -141,7 +141,7 @@ with col1:
 with col2:
     st.metric("MBTI 열 수", f"{len(MBTI_COLS)}")
 with col3:
-    top_dom = _df["_dominant_mbti"].value_counts().idxtop() if not _df.empty else "-"
+    top_dom = _df["_dominant_mbti"].value_counts().idxmax()"-"
     st.metric("가장 흔한 지배 타입", top_dom)
 with col4:
     st.metric("데이터 상태", "OK" if len(MBTI_COLS) >= 8 else "확인 필요")
@@ -170,20 +170,20 @@ with TAB1:
     # Bar chart with Altair
     value_field = selected_type
     base = alt.Chart(top_df).encode(
-        x=alt.X(alt.Shorthand(value_field), title=f"{selected_type} 값" + (" (%)" if fmt_pct else "")),
+        x=alt.X(alt.Shorthand(vx=alt.X(f"{value_field}:Q",} 값" + (" (%)" if fmt_pct else "")),
         y=alt.Y("Country:N", sort='-x', title="국가"),
-        tooltip=["Country", alt.Tooltip(value_field, format=".2%" if fmt_pct else ".4f", title=selected_type)],
+        tooltip=["Country", alt.Tooltip(value_fieldalt.Tooltip(f"{value_field}:Q",t else ".4f", title=selected_type)],
     )
 
     color_scale = alt.Scale(scheme="blues")
     bars = base.mark_bar().encode(
-        color=alt.Color(value_field, scale=color_scale, legend=None)
+        color=alt.Color(value_fcolor=alt.Color(f"{value_field}:Q",end=None)
     )
 
     text = alt.Chart(top_df).mark_text(dx=5, dy=0, align="left", baseline="middle").encode(
         x=alt.X(value_field),
-        y=alt.Y("Country"),
-        text=alt.Text(value_field, format=".2%" if fmt_pct else ".4f"),
+ x=alt.X(f"{value_field}:Q")try"),
+   y=alt.Y("Country:N")(value_field, format=".2%" if fmt_pct else ".4f"),
     )
 
     chart = (bars + text).properties(height=520)
