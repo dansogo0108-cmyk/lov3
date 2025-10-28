@@ -1,18 +1,12 @@
-# app.py
+# app.py (robust, no extra installs)
 # -------------------------------------------------------------
-# 50개 국가의 출산률(Fertility)과 GDP, 성장률을 담은 CSV를
-# 생성(또는 업로드)하고, 향후 GDP 기반 국가 순위 변화를
-# 단순 투영(Projections)하여 시각적으로 탐색하는 앱.
-# - 시각화: Altair (Streamlit Cloud 기본 제공)
-# - 추가 설치 금지: pandas, numpy, streamlit, altair만 사용
+# 50개 국가의 출산률×GDP 데이터 생성/업로드 + Top10 & 순위 투영
+# Altair로만 시각화, 추가 라이브러리 설치 금지(Styler gradient 사용 안 함)
 # -------------------------------------------------------------
 
 from __future__ import annotations
 import io
-import math
-import random
-import datetime as dt
-from typing import List, Tuple
+from typing import List, Dict
 
 import pandas as pd
 import numpy as np
@@ -41,115 +35,135 @@ st.markdown(
 )
 
 # -------------------------------------------------------------
-# 샘플 50개국 리스트 (임의 예시)
+# 상수/초기 국가 목록
 # -------------------------------------------------------------
 COUNTRIES_50 = [
-    "United States", "China", "Japan", "Germany", "India", "United Kingdom", "France",
-    "Italy", "Canada", "South Korea", "Russia", "Brazil", "Australia", "Spain",
-    "Mexico", "Indonesia", "Netherlands", "Saudi Arabia", "Turkey", "Switzerland",
-    "Taiwan", "Poland", "Sweden", "Belgium", "Thailand", "Ireland", "Israel",
-    "Argentina", "Norway", "United Arab Emirates", "South Africa", "Denmark",
-    "Singapore", "Malaysia", "Philippines", "Vietnam", "Portugal", "Greece",
-    "Czechia", "Chile", "Colombia", "New Zealand", "Finland", "Austria",
-    "Hungary", "Romania", "Peru", "Egypt", "Pakistan", "Bangladesh"
-]
-
-SCHEMA = [
-    ("Country", "str", "국가명"),
-    ("GDP_BillionUSD", "float", "현재 GDP (십억 달러)"),
-    ("GDP_GrowthRate", "float", "연간 성장률(소수, 예: 0.03=3%)"),
-    ("Fertility_Rate", "float", "출산율(여성 1인당 출생수)"),
-    ("GDP_Rank", "int", "현재 GDP 순위(1=최상위)"),
+    "United States","China","Japan","Germany","India","United Kingdom","France",
+    "Italy","Canada","South Korea","Russia","Brazil","Australia","Spain",
+    "Mexico","Indonesia","Netherlands","Saudi Arabia","Turkey","Switzerland",
+    "Taiwan","Poland","Sweden","Belgium","Thailand","Ireland","Israel",
+    "Argentina","Norway","United Arab Emirates","South Africa","Denmark",
+    "Singapore","Malaysia","Philippines","Vietnam","Portugal","Greece",
+    "Czechia","Chile","Colombia","New Zealand","Finland","Austria",
+    "Hungary","Romania","Peru","Egypt","Pakistan","Bangladesh"
 ]
 
 DEFAULT_FILENAME = "country_metrics_50.csv"
 
-# -------------------------------------------------------------
-# 데이터 생성 유틸: 현실적인 범위에서 무작위 샘플 생성
-# -------------------------------------------------------------
+# 표준 컬럼명
+STD = {
+    "country": "Country",
+    "gdp_billionusd": "GDP_BillionUSD",
+    "gdp_growthrate": "GDP_GrowthRate",
+    "fertility_rate": "Fertility_Rate",
+    "gdp_rank": "GDP_Rank",
+}
 
-def seed_random(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-
-
-def generate_sample_dataset(countries: List[str]) -> pd.DataFrame:
-    """간단한 규칙으로 50개국 임의 데이터를 생성한다.
-    - GDP_BillionUSD: 80 ~ 26,000 사이 로그분포에 가깝게
-    - GDP_GrowthRate: -2% ~ 8% 사이(평균 3% 근처)
-    - Fertility_Rate: 0.9 ~ 4.5 사이
-    - GDP_Rank: GDP 역순으로 랭크
-    """
-    seed_random()
-
-    # GDP: 로그정규에 가깝게 생성 → 스케일 조정
-    gdp = np.exp(np.random.normal(loc=7.5, scale=1.1, size=len(countries)))  # ~ e^(6~9)
-    gdp = np.interp(gdp, (gdp.min(), gdp.max()), (80, 26000))
-
-    # 성장률: 베타/정규 혼합 대신 단순 정규 절단
-    growth = np.random.normal(loc=0.03, scale=0.02, size=len(countries))  # 평균 3%
-    growth = np.clip(growth, -0.02, 0.08)
-
-    # 출산률: 대체로 1.0~2.5, 일부 국가는 3~4대
-    fert = np.random.normal(loc=1.8, scale=0.6, size=len(countries))
-    fert = np.clip(fert, 0.9, 4.5)
-
-    df = pd.DataFrame({
-        "Country": countries,
-        "GDP_BillionUSD": gdp,
-        "GDP_GrowthRate": growth,
-        "Fertility_Rate": fert,
-    })
-
-    # GDP 랭크(내림차순으로 1위=최대)
-    df = df.sort_values("GDP_BillionUSD", ascending=False).reset_index(drop=True)
-    df["GDP_Rank"] = np.arange(1, len(df) + 1)
-    # 원래 순서 정렬 복원은 불필요. 현재는 GDP 기준으로 정렬된 상태.
-    return df
+# 컬럼 별 허용 별칭 (소문자/공백/기호 제거 후 비교)
+ALIASES: Dict[str, List[str]] = {
+    "country": ["country","nation","countryname","countries"],
+    "gdp_billionusd": ["gdp_billionusd","gdp","gdpusd","gdp_usd_billion","gdp_current_usd_billion","gdp(bn)","gdp_billion"],
+    "gdp_growthrate": ["gdp_growthrate","growth","growthrate","gdp_growth","annual_growth","gdp_yoy"],
+    "fertility_rate": ["fertility_rate","tfr","birthrate","birth_rate","fertility"],
+    "gdp_rank": ["gdp_rank","rank","gdporder","rank_gdp"],
+}
 
 # -------------------------------------------------------------
-# 파일 입출력
+# 유틸
 # -------------------------------------------------------------
+
+def norm(s: str) -> str:
+    return ''.join(ch for ch in s.lower().strip() if ch.isalnum())
+
 @st.cache_data(show_spinner=False)
 def save_csv_to_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
+# -------------------------------------------------------------
+# 샘플 데이터 생성
+# -------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load_csv(file_like) -> pd.DataFrame:
-    df = pd.read_csv(file_like)
-    # 스키마 최소 검증
-    need_cols = {"Country", "GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate", "GDP_Rank"}
-    missing = need_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"다음 필드가 필요합니다: {', '.join(sorted(missing))}")
-    # 타입 캐스팅
-    df["Country"] = df["Country"].astype(str)
-    df["GDP_BillionUSD"] = pd.to_numeric(df["GDP_BillionUSD"], errors="coerce")
-    df["GDP_GrowthRate"] = pd.to_numeric(df["GDP_GrowthRate"], errors="coerce")
-    df["Fertility_Rate"] = pd.to_numeric(df["Fertility_Rate"], errors="coerce")
-    df["GDP_Rank"] = pd.to_numeric(df["GDP_Rank"], errors="coerce").astype("Int64")
-    # 결측 제거(핵심 지표 누락 행 제거)
-    df = df.dropna(subset=["GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate"])
+def generate_sample_dataset(countries: List[str]) -> pd.DataFrame:
+    rng = np.random.default_rng(42)
+
+    gdp_raw = np.exp(rng.normal(loc=7.5, scale=1.1, size=len(countries)))
+    gdp_bil = np.interp(gdp_raw, (gdp_raw.min(), gdp_raw.max()), (80, 26000))
+
+    growth = rng.normal(loc=0.03, scale=0.02, size=len(countries))
+    growth = np.clip(growth, -0.02, 0.08)
+
+    fert = rng.normal(loc=1.8, scale=0.6, size=len(countries))
+    fert = np.clip(fert, 0.9, 4.5)
+
+    df = pd.DataFrame({
+        "Country": countries,
+        "GDP_BillionUSD": gdp_bil,
+        "GDP_GrowthRate": growth,
+        "Fertility_Rate": fert,
+    })
+    df = df.sort_values("GDP_BillionUSD", ascending=False).reset_index(drop=True)
+    df["GDP_Rank"] = np.arange(1, len(df) + 1)
     return df
 
 # -------------------------------------------------------------
-# 투영 로직: 단순 복리 성장 기반 GDP 예측 및 재랭킹
+# CSV 로더(유연한 컬럼 매핑 + 자동 보정)
 # -------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_csv(file_like) -> pd.DataFrame:
+    df = pd.read_csv(file_like)
+    # 1) 컬럼 전처리 & 매핑
+    original = list(df.columns)
+    mapping = {}
+    for col in original:
+        key = None
+        nc = norm(col)
+        for std_key, alist in ALIASES.items():
+            if nc in alist:
+                key = STD[std_key]
+                break
+        mapping[col] = key if key else col  # 모르는 컬럼은 유지
+    df = df.rename(columns=mapping)
 
+    # 최소 필수: Country, GDP_BillionUSD, GDP_GrowthRate, Fertility_Rate
+    need = {STD["country"], STD["gdp_billionusd"], STD["gdp_growthrate"], STD["fertility_rate"]}
+    missing = need - set(df.columns)
+    if missing:
+        raise ValueError(f"다음 필드가 필요합니다: {', '.join(sorted(missing))}")
+
+    # 타입 보정
+    df["Country"] = df["Country"].astype(str)
+    for c in ["GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate"]:
+        # 퍼센트 문자열 처리(예: "3.2%")
+        if c == "GDP_GrowthRate" and df[c].dtype == object:
+            df[c] = df[c].astype(str).str.replace('%','', regex=False)
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # 성장률이 1보다 큰 값(예: 3.2)이면 %로 간주해 0.032로 변환
+    if (df["GDP_GrowthRate"] > 1).any():
+        df.loc[df["GDP_GrowthRate"] > 1, "GDP_GrowthRate"] = df.loc[df["GDP_GrowthRate"] > 1, "GDP_GrowthRate"] / 100.0
+
+    # GDP_Rank 없으면 계산
+    if "GDP_Rank" not in df.columns or df["GDP_Rank"].isna().all():
+        df = df.sort_values("GDP_BillionUSD", ascending=False).reset_index(drop=True)
+        df["GDP_Rank"] = np.arange(1, len(df) + 1)
+
+    # 핵심 결측 제거
+    df = df.dropna(subset=["GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate"]).reset_index(drop=True)
+    return df
+
+# -------------------------------------------------------------
+# 투영 로직
+# -------------------------------------------------------------
+@st.cache_data(show_spinner=False)
 def project_gdp_and_rank(df: pd.DataFrame, years: int = 5) -> pd.DataFrame:
     out = df.copy()
     out["Projected_GDP_BillionUSD"] = out["GDP_BillionUSD"] * (1.0 + out["GDP_GrowthRate"]) ** years
-    # 재랭킹: GDP 큰 순서가 1위
     out = out.sort_values("Projected_GDP_BillionUSD", ascending=False).reset_index(drop=True)
     out["Projected_Rank"] = np.arange(1, len(out) + 1)
-    # 원래 순위와 비교 위해 원본 열 합침
-    out = out.merge(
-        df[["Country", "GDP_Rank"]], on="Country", how="left", suffixes=("", "_orig")
-    )
-    out["Rank_Change"] = out["GDP_Rank"] - out["Projected_Rank"]  # +면 순위 상승(숫자 작아짐)
-    # 보기 좋게 정렬
+    out = out.merge(df[["Country", "GDP_Rank"]], on="Country", how="left")
+    out["Rank_Change"] = out["GDP_Rank"] - out["Projected_Rank"]
     out = out.sort_values("Projected_Rank").reset_index(drop=True)
     return out
 
@@ -172,20 +186,17 @@ else:
 years = st.sidebar.slider("투영 기간(년)", min_value=1, max_value=15, value=5)
 
 st.markdown("<div class='headline'>국가 지표 Top10 & 순위 투영(Altair)</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtle'>출산률과 GDP, 성장률을 바탕으로 간단한 미래 순위를 추정합니다. (학습용 예시)</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtle'>출산률·GDP·성장률을 바탕으로 간단한 미래 순위를 추정합니다. (학습용)</div>", unsafe_allow_html=True)
 
-# 다운로드 제공
-csv_bytes = save_csv_to_bytes(df)
+# CSV 다운로드
 st.download_button(
     label=f"CSV 다운로드 — {DEFAULT_FILENAME}",
-    data=csv_bytes,
+    data=save_csv_to_bytes(df),
     file_name=DEFAULT_FILENAME,
     mime="text/csv",
 )
 
-# -------------------------------------------------------------
 # 파생/집계
-# -------------------------------------------------------------
 proj = project_gdp_and_rank(df, years=years)
 
 # KPI
@@ -197,17 +208,12 @@ with c2:
 with c3:
     st.metric("평균 출산률", f"{df['Fertility_Rate'].mean():.2f}")
 with c4:
-    rank_up = int((proj["Rank_Change"] > 0).sum())
-    st.metric("순위 상승 국가 수", f"{rank_up}")
+    st.metric("순위 상승 국가 수", f"{int((proj['Rank_Change']>0).sum())}")
 
-# -------------------------------------------------------------
-# 탭 구성
-# -------------------------------------------------------------
+# 탭
 TAB1, TAB2, TAB3 = st.tabs(["🏆 Top 10", "📈 순위 투영", "🔎 상관/산점도"])
 
-# -------------------------------------------------------------
-# TAB1 — 특정 분야가 높은 국가 Top10
-# -------------------------------------------------------------
+# TAB1 — 특정 지표 Top10
 with TAB1:
     met_map = {
         "현재 GDP": "GDP_BillionUSD",
@@ -215,9 +221,7 @@ with TAB1:
         "출산률": "Fertility_Rate",
         f"투영 GDP(+{years}y)": "Projected_GDP_BillionUSD",
     }
-
-    # proj가 필요한 항목 포함하므로 미리 합본 뷰 준비
-    merged = df.merge(proj[["Country", "Projected_GDP_BillionUSD", "Projected_Rank"]], on="Country", how="left")
+    merged = df.merge(proj[["Country","Projected_GDP_BillionUSD","Projected_Rank"]], on="Country", how="left")
 
     c1, c2 = st.columns([1.2, 1])
     with c1:
@@ -226,10 +230,8 @@ with TAB1:
         topn = st.slider("Top N", min_value=5, max_value=30, value=10)
 
     field = met_map[metric_label]
-
     top_df = merged[["Country", field]].dropna().sort_values(field, ascending=False).head(topn)
 
-    # 값 포맷 결정
     is_pct = (field == "GDP_GrowthRate")
     x_title = metric_label + (" (%)" if is_pct else "")
     tooltip_fmt = ".2%" if is_pct else ".2f"
@@ -253,9 +255,7 @@ with TAB1:
             show[field] = (show[field] * 100).round(2)
         st.dataframe(show, use_container_width=True)
 
-# -------------------------------------------------------------
 # TAB2 — 순위 투영/변화
-# -------------------------------------------------------------
 with TAB2:
     view_cols = [
         "Country", "GDP_Rank", "Projected_Rank", "Rank_Change", "GDP_BillionUSD", "Projected_GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate"
@@ -293,9 +293,7 @@ with TAB2:
     )
     st.altair_chart(ch2, use_container_width=True)
 
-# -------------------------------------------------------------
-# TAB3 — 상관/산점도
-# -------------------------------------------------------------
+# TAB3 — 상관/산점도 (matplotlib 불필요, Altair만 사용)
 with TAB3:
     st.markdown("#### 출산률과 성장률/규모 관계")
     left, right = st.columns(2)
@@ -328,15 +326,23 @@ with TAB3:
         )
         st.altair_chart(s2, use_container_width=True)
 
-    # 간단 상관계수 표(참고)
-    st.markdown("#### 상관계수(피어슨)")
-    corr = df[["GDP_BillionUSD", "GDP_GrowthRate", "Fertility_Rate"]].corr()
-    st.dataframe(corr.style.background_gradient(cmap="Blues"), use_container_width=True)
+    st.markdown("#### 상관계수 히트맵 (Altair)")
+    corr = df[["GDP_BillionUSD","GDP_GrowthRate","Fertility_Rate"]].corr().reset_index().melt(id_vars="index")
+    corr.columns = ["VarX","VarY","Corr"]
+    heat = (
+        alt.Chart(corr)
+        .mark_rect()
+        .encode(
+            x=alt.X("VarX:N", title=""),
+            y=alt.Y("VarY:N", title=""),
+            color=alt.Color("Corr:Q", scale=alt.Scale(scheme="blueorange", domain=[-1,1])),
+            tooltip=["VarX","VarY", alt.Tooltip("Corr:Q", format=".2f")],
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(heat, use_container_width=True)
 
-# -------------------------------------------------------------
 # 푸터
-# -------------------------------------------------------------
 st.caption(
-    "학습용 예시 데이터입니다. 실제 정책/연구 해석에는 최신 공식 통계를 사용하세요. "
-    "CSV 업로드를 통해 여러분의 데이터로 즉시 대체할 수 있습니다."
+    "학습용 예시입니다. 실제 분석에는 최신 공식 통계를 사용하고, 업로드 기능으로 여러분의 데이터를 바로 적용하세요."
 )
