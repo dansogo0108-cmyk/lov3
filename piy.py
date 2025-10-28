@@ -158,12 +158,25 @@ def load_csv(file_like) -> pd.DataFrame:
 # -------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def project_gdp_and_rank(df: pd.DataFrame, years: int = 5) -> pd.DataFrame:
+    """Compute projected GDP and ranks without creating duplicate/suffixed columns.
+    Keeps original rank in `Orig_Rank` to avoid KeyError from merge suffixes.
+    """
     out = df.copy()
+    # Ensure GDP_Rank exists
+    if "GDP_Rank" not in out.columns:
+        out = out.sort_values("GDP_BillionUSD", ascending=False).reset_index(drop=True)
+        out["GDP_Rank"] = np.arange(1, len(out) + 1)
+    # Preserve original rank
+    out["Orig_Rank"] = out["GDP_Rank"].astype("Int64")
+
+    # Projected GDP and projected rank
     out["Projected_GDP_BillionUSD"] = out["GDP_BillionUSD"] * (1.0 + out["GDP_GrowthRate"]) ** years
     out = out.sort_values("Projected_GDP_BillionUSD", ascending=False).reset_index(drop=True)
     out["Projected_Rank"] = np.arange(1, len(out) + 1)
-    out = out.merge(df[["Country", "GDP_Rank"]], on="Country", how="left")
-    out["Rank_Change"] = out["GDP_Rank"] - out["Projected_Rank"]
+
+    # Rank change (+: improvement)
+    out["Rank_Change"] = out["Orig_Rank"] - out["Projected_Rank"]
+
     out = out.sort_values("Projected_Rank").reset_index(drop=True)
     return out
 
